@@ -1,56 +1,58 @@
 // SPDX-License-Identifier: UNLICENSED
+
 pragma solidity ^0.8.9;
 
 import '@openzeppelin/contracts/token/ERC721/extensions/ERC721URIStorage.sol';
 import '@openzeppelin/contracts/security/ReentrancyGuard.sol';
 
-contract Auction is ERC721URIStorage, ReentrancyGuard {
+contract ContractPlatform is ERC721URIStorage, ReentrancyGuard {
 
     uint256 public tokenCounter;
-    uint256 public auctionCounter;
+    uint256 public contractCounter;
 
     uint8 public constant STATUS_OPEN = 1;
     uint8 public constant STATUS_DONE = 2;
     uint8 public constant STATUS_COMPLETED = 3;
+    uint8 public constant STATUS_CANCELLED = 4;
 
-    uint256 public minBidIncrement = 1 ether;
-    uint256 public auctionTimeExtension = 300;
-    uint256 public platformFeePercent = 2;
-    uint256 public bidFee = 0.01 ether; // fee to charge for participation in auction
+    uint256 public platformFeePercent = 2; // Platform fee percentage
 
-    struct AuctionDetails {
-        address seller;
+    struct ContractDetails {
+        address creator;
         uint256 tokenId;
         string commodity;
         uint256 rate;
         uint256 quantity;
-        uint256 price;
-        uint256 netPrice;
         uint256 startAt;
         uint256 endAt;
         uint256 deliveryDate;
         uint8 status;
+        address selectedApplicant;
+        bool creatorAgreement;
+        bool applicantAgreement;
         uint256 lockedFunds;
+        bool isFarmerInitiated;
+    }
+
+    struct Application {
+        address applicant;
+        uint256 proposedAmount;
     }
 
     event Minted(address indexed minter, uint256 nftID, string uri);
-    event AuctionCreated(uint256 auctionId, address indexed seller, string commodity, uint256 rate, uint256 quantity, uint256 price, uint256 deliveryDate, uint256 tokenId, uint256 startAt, uint256 endAt);
-    event BidCreated(uint256 auctionId, address indexed bidder, uint256 bid, uint256 fee);
-    event AuctionCompleted(uint256 auctionId, address indexed seller, address indexed bidder, uint256 bid);
-    event WithdrawBid(uint256 auctionId, address indexed bidder, uint256 bid);
-    event AuctionCancelled(uint256 auctionId);
-    event DepositForfeited(uint256 auctionId, address indexed bidder, uint256 fee);
-    event FundsLocked(uint256 auctionId, uint256 amount);
-    event ContractFulfilled(uint256 auctionId, address indexed bidder, uint256 amount);
+    event ContractCreated(uint256 contractId, address indexed creator, string commodity, uint256 rate, uint256 quantity, uint256 deliveryDate, uint256 tokenId, uint256 startAt, uint256 endAt, bool isFarmerInitiated);
+    event ApplicationSubmitted(uint256 contractId, address indexed applicant, uint256 proposedAmount);
+    event ApplicantSelected(uint256 contractId, address indexed creator, address indexed applicant);
+    event ContractCompleted(uint256 contractId, address indexed creator, address indexed applicant);
+    event ContractCancelled(uint256 contractId);
+    event ContractFulfilled(uint256 contractId, address indexed applicant, uint256 amount);
 
-    mapping(uint256 => AuctionDetails) public auctions;
-    mapping(uint256 => mapping(address => uint256)) public bids;
-    mapping(uint256 => address) public lowestBidder;
-    mapping(uint256 => mapping(address => uint256)) public bidFees;
+    mapping(uint256 => ContractDetails) public contracts;
+    mapping(uint256 => Application[]) public applications;
 
     constructor() ERC721("KrishiNFT", "KNFT") {
         tokenCounter = 0;
-        auctionCounter = 0;
+        contractCounter = 0;
     }
 
     function mint(string memory tokenURI, address minterAddress) public returns (uint256) {
@@ -62,144 +64,137 @@ contract Auction is ERC721URIStorage, ReentrancyGuard {
         return tokenId;
     }
 
-    function createAuction(
+    function createContract(
         string memory commodity,
         uint256 rate,
         uint256 quantity,
-        uint256 price,
         uint256 deliveryDate,
         uint256 tokenId,
-        uint256 durationInSeconds
+        uint256 durationInSeconds,
+        bool isFarmerInitiated
     ) public returns (uint256) {
-        auctionCounter++;
-        uint256 auctionId = auctionCounter;
+        contractCounter++;
+        uint256 contractId = contractCounter;
 
         uint256 startAt = block.timestamp;
         uint256 endAt = startAt + durationInSeconds;
 
-        auctions[auctionId] = AuctionDetails({
-            seller: msg.sender,
+        contracts[contractId] = ContractDetails({
+            creator: msg.sender,
             tokenId: tokenId,
             commodity: commodity,
             rate: rate,
             quantity: quantity,
-            price: price,
-            netPrice: price,
             status: STATUS_OPEN,
             startAt: startAt,
             endAt: endAt,
             deliveryDate: deliveryDate,
-            lockedFunds: 0
+            selectedApplicant: address(0),
+            creatorAgreement: false,
+            applicantAgreement: false,
+            lockedFunds: 0,
+            isFarmerInitiated: isFarmerInitiated
         });
 
         _transfer(msg.sender, address(this), tokenId);
-        emit AuctionCreated(auctionId, msg.sender, commodity, rate, quantity, price, deliveryDate, tokenId, startAt, endAt);
-        return auctionId;
+        emit ContractCreated(contractId, msg.sender, commodity, rate, quantity, deliveryDate, tokenId, startAt, endAt, isFarmerInitiated);
+        return contractId;
     }
 
-    function bid(uint256 auctionId) public payable nonReentrant {
-        require(isAuctionOpen(auctionId), 'Auction has ended');
-        AuctionDetails storage auction = auctions[auctionId];
-        require(msg.sender != auction.seller, "Cannot bid on your own auction");
+    function applyForContract(uint256 contractId, uint256 proposedAmount) public payable nonReentrant {
+        require(isContractOpen(contractId), 'Contract is no longer open for applications');
+        ContractDetails storage contractDetails = contracts[contractId];
+        require(msg.sender != contractDetails.creator, "Contract creator cannot apply");
+        require(msg.value >= proposedAmount, "Insufficient funds sent");
 
-        uint256 newBid = bids[auctionId][msg.sender] + msg.value;
-        require(newBid < auction.price, "Cannot bid above or equal to the latest bidding price");
-        require(auction.price - newBid >= minBidIncrement, "Bid increment too low");
+        Application memory application = Application({
+            applicant: msg.sender,
+            proposedAmount: proposedAmount
+        });
 
-        require(msg.value >= bidFee, "Insufficient bid fee");
+        applications[contractId].push(application);
 
-        bids[auctionId][msg.sender] += msg.value;
-        bidFees[auctionId][msg.sender] = bidFee;
-        lowestBidder[auctionId] = msg.sender;
+        emit ApplicationSubmitted(contractId, msg.sender, proposedAmount);
+    }
 
-        if (auction.endAt - block.timestamp < auctionTimeExtension) {
-            auction.endAt = block.timestamp + auctionTimeExtension;
+    function selectApplicant(uint256 contractId, address applicant) public nonReentrant {
+        ContractDetails storage contractDetails = contracts[contractId];
+        require(msg.sender == contractDetails.creator, "Only contract creator can select applicant");
+        require(isContractOpen(contractId), 'Contract is no longer open');
+
+        bool applicantFound = false;
+        uint256 proposedAmount = 0;
+        for (uint i = 0; i < applications[contractId].length; i++) {
+            if (applications[contractId][i].applicant == applicant) {
+                applicantFound = true;
+                proposedAmount = applications[contractId][i].proposedAmount;
+                break;
+            }
+        }
+        require(applicantFound, "Selected applicant did not apply for this contract");
+
+        contractDetails.selectedApplicant = applicant;
+        contractDetails.status = STATUS_DONE;
+        contractDetails.lockedFunds = proposedAmount;
+
+        _transfer(address(this), applicant, contractDetails.tokenId);
+
+        emit ApplicantSelected(contractId, msg.sender, applicant);
+    }
+
+    function agreeFulfillment(uint256 contractId) public {
+        ContractDetails storage contractDetails = contracts[contractId];
+        require(contractDetails.status == STATUS_DONE, "Contract must be completed before fulfilling it");
+        require(msg.sender == contractDetails.creator || msg.sender == contractDetails.selectedApplicant, "Only creator or selected applicant can agree to fulfillment");
+
+        if (msg.sender == contractDetails.creator) {
+            contractDetails.creatorAgreement = true;
+        } else if (msg.sender == contractDetails.selectedApplicant) {
+            contractDetails.applicantAgreement = true;
         }
 
-        emit BidCreated(auctionId, msg.sender, newBid, bidFee);
-    }
-
-    function completeAuction(uint256 auctionId) public payable nonReentrant {
-        require(!isAuctionOpen(auctionId), 'Auction is still open');
-
-        AuctionDetails storage auction = auctions[auctionId];
-        address winner = lowestBidder[auctionId];
-        require(
-            msg.sender == auction.seller || msg.sender == winner,
-            'Only seller or winner can complete auction'
-        );
-
-        if (winner != address(0)) {
-            require(msg.value == auction.price, "Company must provide the exact auction price");
-            auction.lockedFunds = msg.value;
-
-            _transfer(address(this), winner, auction.tokenId);
-            emit FundsLocked(auctionId, auction.lockedFunds);
-
-        } else {
-            _transfer(address(this), auction.seller, auction.tokenId);
-        }
-
-        auction.status = STATUS_DONE;
-        emit AuctionCompleted(auctionId, auction.seller, winner, bids[auctionId][winner]);
-    }
-
-    function fulfillContract(uint256 auctionId) public nonReentrant {
-        AuctionDetails storage auction = auctions[auctionId];
-        require(auction.status == STATUS_DONE, "Auction must be completed before fulfilling contract");
-        address winner = lowestBidder[auctionId];
-        require(msg.sender == winner, "Only the winning farmer can fulfill the contract");
-
-        uint256 amount = auction.lockedFunds;
-        auction.lockedFunds = 0;
-        auction.status = STATUS_COMPLETED;
-
-        (bool sent, ) = winner.call{value: amount}("");
-        require(sent, "Failed to release funds to farmer");
-
-        uint256 fee = bidFees[auctionId][winner];
-        bidFees[auctionId][winner] = 0;
-
-        emit ContractFulfilled(auctionId, winner, amount);
-    }
-
-    function forfeitBid(uint256 auctionId) internal {
-        address winner = lowestBidder[auctionId];
-        uint256 fee = bidFees[auctionId][winner];
-
-        if (fee > 0) {
-            bidFees[auctionId][winner] = 0;
-            (bool sent, ) = owner().call{value: fee}("");
-            require(sent, "Failed to forfeit bid fee");
-
-            emit DepositForfeited(auctionId, winner, fee);
+        if (contractDetails.creatorAgreement && contractDetails.applicantAgreement) {
+            fulfillContract(contractId);
         }
     }
 
-    function isAuctionOpen(uint256 id) public view returns (bool) {
-        return
-            auctions[id].status == STATUS_OPEN &&
-            auctions[id].endAt > block.timestamp;
-    }
+    function fulfillContract(uint256 contractId) internal nonReentrant {
+        ContractDetails storage contractDetails = contracts[contractId];
+        address payable recipient = payable(contractDetails.isFarmerInitiated ? contractDetails.creator : contractDetails.selectedApplicant);
 
-    function isAuctionExpired(uint256 id) public view returns (bool) {
-        return auctions[id].endAt <= block.timestamp;
-    }
-
-    function _transferFund(address payable to, uint256 amount) internal {
-        if (amount == 0) {
-            return;
-        }
-        require(to != address(0), 'Error, cannot transfer to address(0)');
+        uint256 amount = contractDetails.lockedFunds;
+        contractDetails.status = STATUS_COMPLETED;
+        contractDetails.lockedFunds = 0;
 
         uint256 platformFee = (amount * platformFeePercent) / 100;
         uint256 finalAmount = amount - platformFee;
 
-        (bool transferSent, ) = to.call{value: finalAmount}("");
-        require(transferSent, "Error, failed to send Ether");
+        (bool sent, ) = recipient.call{value: finalAmount}("");
+        require(sent, "Failed to release funds to recipient");
 
-        (bool feeSent, ) = owner().call{value: platformFee}("");
-        require(feeSent, "Error, failed to send platform fee");
+        (bool feeSent, ) = address(this).call{value: platformFee}("");
+        require(feeSent, "Failed to transfer platform fee");
+
+        emit ContractFulfilled(contractId, contractDetails.selectedApplicant, amount);
+    }
+
+    function cancelContract(uint256 contractId) public {
+        ContractDetails storage contractDetails = contracts[contractId];
+        require(msg.sender == contractDetails.creator, "Only the creator can cancel the contract");
+        require(contractDetails.status == STATUS_OPEN, "Can only cancel open contracts");
+
+        contractDetails.status = STATUS_CANCELLED;
+        _transfer(address(this), contractDetails.creator, contractDetails.tokenId);
+
+        emit ContractCancelled(contractId);
+    }
+
+    function isContractOpen(uint256 id) public view returns (bool) {
+        return contracts[id].status == STATUS_OPEN && contracts[id].endAt > block.timestamp;
+    }
+
+    function getApplications(uint256 contractId) public view returns (Application[] memory) {
+        return applications[contractId];
     }
 
     fallback() external payable {
