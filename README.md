@@ -1,5 +1,11 @@
 # sih_smart_contract
 
+note:
+
+1. in code, comment wherever it makes sense and to explain why and how something works. makes it easier to
+   understand
+2. keep naming convention and names consistent
+
 (put a tick besides ones that are done. V besides one vishwajit will do, Y besides ones yateen will do)
 #to do now:
 
@@ -14,7 +20,7 @@
 3. time period in which both parties have to agree. probably not possible in contract but in backend.
 4. punishing farmers for applying but not agreeing. possible solutions: charge cancellation fees to farmers  
    when applying.
-5. advanced contract changing from applicant notes. issue is with exploitation.
+5. advanced contract changing from applicant notes like logistics manager. issue is with exploitation.
 6. fractional contracting.
 7. way to automatically close contracts/applicant based on produce in farmers possession after a deal or if
    for some reason produce is lower or higher, then way to manage that too

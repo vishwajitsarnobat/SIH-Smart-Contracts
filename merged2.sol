@@ -1,5 +1,4 @@
 // SPDX-License-Identifier: UNLICENSED
-
 pragma solidity ^0.8.9;
 
 //to fix debugger in vscode
@@ -72,20 +71,20 @@ contract ContractPlatform is ERC721URIStorage, ReentrancyGuard {
 
     event Minted(address indexed minter, uint256 nftID, string uri);
     event ContractCreated(
+        uint256 contractId,
         address creator,
         bool isCreatorFarmer,
-        uint256 contractId,
         uint256 tokenId,
         string commodity,
         uint256 rate,
         uint32 quantity,
+        uint256 lockInAmount,
         string[]  clauses,
+        uint256 deliveryDate,
         int32 deliveryLatitude,
         int32 deliveryLongitude,
         uint256 startAt,
         uint256 endAt,
-        uint256 deliveryDate,
-        uint256 lockInAmount,
         bool creatorResponsibleForLogistics,
         string  quality
         
@@ -159,6 +158,10 @@ contract ContractPlatform is ERC721URIStorage, ReentrancyGuard {
             commodity: commodity,
             rate: rate,
             quantity: quantity,
+            //number should be greater than 100 and last 2 decimal places should be 0, or leads to error
+        //so better to use getContractRate to get the rate in front end
+        //charging 5% of the total amount as lock in.
+            lockInAmount : (rate * quantity * 5) / 100,
             clauses: clauses,
             deliveryLatitude: deliveryLatitude,
             deliveryLongitude: deliveryLongitude,
@@ -173,30 +176,28 @@ contract ContractPlatform is ERC721URIStorage, ReentrancyGuard {
             creatorResponsibleForLogistics: creatorResponsibleForLogistics,
             quality: quality
             });
-        //number should be greater than 100 and last 2 decimal places should be 0, or leads to error
-        //so better to use getContractRate to get the rate in front end
-        //charging 5% of the total amount as lock in.
-        contracts[contractCounter].lockInAmount = (rate * quantity * 5) / 100;
+        
 
         _transfer(msg.sender, address(this), tokenId);
         emit ContractCreated(
+            contractCounter,
             creator,
             isCreatorFarmer,
-            contractCounter,
             tokenId,
             commodity,
             rate,
             quantity,
+            contracts[contractCounter].lockInAmount,
             clauses,
+            deliveryDate,
             deliveryLatitude,
             deliveryLongitude,
             contracts[contractCounter].startAt,
             contracts[contractCounter].endAt,
-            deliveryDate,
             creatorResponsibleForLogistics,
             quality
         );
-        return contractId;
+        return contractCounter;
     }
 
     function mint(
@@ -263,7 +264,7 @@ contract ContractPlatform is ERC721URIStorage, ReentrancyGuard {
         contractDetails.rate = applications[contractId][index].proposedRate;
         contractDetails.selectedApplicant = applicant;
         contractDetails.status = Status.ALLOTED;
-        freeFunds(contractId);
+        freeFunds(contractId,contractDetails.selectedApplicant);
         emit ApplicantSelected(contractId, msg.sender, applicant,contractDetails.rate,applications[contractId][index].note);
         //should be deleted or not?
         delete applications[contractId];
@@ -279,14 +280,15 @@ contract ContractPlatform is ERC721URIStorage, ReentrancyGuard {
             return ;
         }
         //send back money to all applicants except the selected one
+        bool sent;
         for (uint i = 0; i < applications[contractId].length; i++) {
             if (applications[contractId][i].applicant != exclude ) {
-                (bool sent, ) = payable(applications[contractId][i].applicant).call{value: contractDetails.lockInAmount }("");
+                ( sent, ) = payable(applications[contractId][i].applicant).call{value: contractDetails.lockInAmount }("");
                 require(sent, "Failed to refund application fee");
             }
         }
     }
-    function agreeFulfillment(uint256 contractId) external payable nonReentrant onlyCreatorOrApplicant {
+    function agreeFulfillment(uint256 contractId) external payable nonReentrant onlyCreatorOrApplicant(contractId) {
         ContractDetails storage contractDetails = contracts[contractId];
         require( contractDetails.status == Status.ALLOTED,"Contract must be alloted before agreeing to fulfilling it");
 
@@ -318,45 +320,47 @@ contract ContractPlatform is ERC721URIStorage, ReentrancyGuard {
         ContractDetails storage contractDetails = contracts[contractId];
         require( contractDetails.status == Status.AGREED,"Contract must be accepted by both parties before funds can be released");
         address payable recipient = payable(msg.sender==contractDetails.creator?contractDetails.selectedApplicant:contractDetails.creator);
-        uint256 platformFee = (amount * platformFeePercent) / 100;
-
+        uint256 platformFee = (contractDetails.rate * platformFeePercent) / 100;
+        bool sent;
         //send money to platform owner or government
-        (bool feeSent, ) = payable(platform_).call{value: platformFee}("");
-        require(feeSent, "Failed to transfer platform fee");
+        (sent, ) = payable(platform_).call{value: platformFee}("");
+        require(sent, "Failed to transfer platform fee");
 
         // Refund application fee to the creator
-        (bool refundSent, ) = payable(contractDetails.creator).call{value: cancellationFee}("");
-        require(refundSent, "Failed to refund contract creation fee");
+        (sent, ) = payable(contractDetails.creator).call{value: cancellationFee}("");
+        require(sent, "Failed to refund contract creation fee");
 
         //send rest to farmer
-        (bool sent, ) = recipient.call{value: address(this).balance}("");
+        (sent, ) = recipient.call{value: address(this).balance}("");
         require(sent, "Failed to release funds to recipient");
         contractDetails.status = Status.COMPLETED;
         emit ContractCompleted(contractId, contractDetails.creator, contractDetails.selectedApplicant, contractDetails.rate, contractDetails.quantity);
     }
 
-    function cancelContract(uint256 contractId,string reason) external payable onlyCreatorOrApplicant(contractId) nonReentrant {
+    function cancelContract(uint256 contractId,string memory reason) external payable onlyCreatorOrApplicant(contractId) nonReentrant {
         ContractDetails storage contractDetails = contracts[contractId];
         require(contractDetails.status == Status.OPEN || contractDetails.status == Status.ALLOTED,"Contract must be open or alloted to be cancelled");
 
-        if(isCreator){
+        if(contractDetails.creator==msg.sender){
             contractDetails.cancellationReason = string(abi.encodePacked("Creator cancelled the contract.\nReason mentioned: ", reason));
         } else{
             require(msg.value == cancellationFee, "Incorrect cancellation fee sent");
             contractDetails.cancellationReason = string(abi.encodePacked("Applicant cancelled the contract.\nReason mentioned: ", reason));
         }
         contractDetails.status = Status.CANCELLED;
-        (bool sent, ) = payable(creator).call{value: cancellationFee}("");
+        bool sent;
+        (sent, ) = payable(contractDetails.creator).call{value: cancellationFee}("");
         require(sent, "Failed to transfer cancellation fee to creator");
         
         //handles case where lock in money needs to be given back to buyer or farmer
         if(contractDetails.status == Status.ALLOTED){
-            address payable recipient;
             if(contractDetails.creator == msg.sender && !contractDetails.isCreatorFarmer){
-                (bool sent, ) =payable(contractDetails.selectedApplicant).call{value: contractDetails.lockInAmount}("");
+                ( sent, ) =payable(contractDetails.selectedApplicant).call{value: contractDetails.lockInAmount}("");
+                require(sent, "Failed to release funds to applicant");
             }
             else if( contractDetails.selectedApplicant == msg.sender && contractDetails.isCreatorFarmer){
-                (bool sent, ) =payable(contractDetails.creator).call{value: contractDetails.lockInAmount}("");
+                (sent, ) =payable(contractDetails.creator).call{value: contractDetails.lockInAmount}("");
+                require(sent, "Failed to release funds to creator");
             } 
 
         }
